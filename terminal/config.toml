@@ -1,0 +1,14 @@
+[ui]
+bar_background_color = "#B4C0DA"
+bar_foreground_color = "#484D57"
+tab_background_color = "#DACEB4"
+tab_foreground_color = "#484D57"
+active_tab_background_color = "#B4DABB"
+# active_tab_background_color = "#e25f0eff"
+
+active_tab_foreground_color = "#484D57"
+enable_side_bar = false
+
+[app]
+
+[keymap]
