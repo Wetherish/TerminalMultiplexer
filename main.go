@@ -14,11 +14,8 @@ func main() {
 		}
 	}()
 
-	fmt.Println("Starting TaskFlow...")
 	mgr := session.NewManager()
-
 	mgr.AddSession()
-
 	mgr.Run()
 }
 

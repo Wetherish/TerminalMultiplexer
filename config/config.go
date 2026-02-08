@@ -1,25 +1,33 @@
 package config
 
-import (
-	"fmt"
-)
-
 type Shortcut struct {
 	Name   string
-	Action func()
+	Action func(t any)
 }
 
-var Config = map[byte]Shortcut{
-	15: { // Ctrl + o
-		Name: "Open Menu",
-		Action: func() {
-			fmt.Print("\r\n\033[32m[TaskFlow] Menu Opened!\033[0m\r\n")
-		},
-	},
-	18: { // Ctrl + r
-		Name: "Run Project",
-		Action: func() {
-			fmt.Print("\r\n\033[34m[TaskFlow] Running Project...\033[0m\r\n")
-		},
-	},
+func NewShortcut(name string, action func(t any)) Shortcut {
+	return Shortcut{Name: name, Action: action}
+}
+
+type Config struct {
+	shortcuts map[string]Shortcut
+}
+
+func NewConfig() *Config {
+	return &Config{
+		shortcuts: make(map[string]Shortcut),
+	}
+}
+
+func (c *Config) RegisterShortcut(key string, shortcut Shortcut) {
+	c.shortcuts[key] = shortcut
+}
+
+func (c *Config) FindAndInvoke(key string, t any) bool {
+	value, ok := c.shortcuts[key]
+	if ok {
+		value.Action(t)
+		return true
+	}
+	return false
 }

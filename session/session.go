@@ -1,7 +1,6 @@
 package session
 
 import (
-	"bytes"
 	"os"
 	"sync"
 )
@@ -9,7 +8,7 @@ import (
 type Session struct {
 	ID     int
 	Ptmx   *os.File
-	Buffer *bytes.Buffer
+	Buffer *RingBuffer
 	Mu     sync.Mutex
 }
 

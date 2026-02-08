@@ -10,24 +10,50 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/charmbracelet/lipgloss"
 	"github.com/creack/pty"
 	"golang.org/x/term"
 )
 
 type Manager struct {
-	Sessions  []*Session
-	ActiveIdx int
-	Mu        sync.Mutex
-	nextID    int
-	winSize   *pty.Winsize
+	Sessions     []*Session
+	ActiveIdx    int
+	Mu           sync.Mutex
+	Config       *config.Config
+	nextID       int
+	winSize      *pty.Winsize
+	scrollRegion string
+}
+
+func MakeAction[T any](f func(T)) func(any) {
+	return func(a any) {
+		if val, ok := a.(T); ok {
+			f(val)
+		}
+	}
 }
 
 func NewManager() *Manager {
-	return &Manager{
+	mgr := &Manager{
 		Sessions:  make([]*Session, 0),
 		ActiveIdx: 0,
+		Config:    config.NewConfig(),
 		nextID:    1,
 	}
+
+	switchTab := MakeAction(func(m *Manager) {
+		m.SwitchTab()
+	})
+
+	newTab := MakeAction(func(m *Manager) {
+		m.AddSession()
+		m.DrawFooter()
+	})
+
+	mgr.Config.RegisterShortcut(config.CtrlN, config.NewShortcut("New Tab", newTab))
+	mgr.Config.RegisterShortcut(config.ShiftTab, config.NewShortcut("Switch Tab", switchTab))
+
+	return mgr
 }
 
 func (m *Manager) AddSession() {
@@ -48,7 +74,7 @@ func (m *Manager) AddSession() {
 	s := &Session{
 		ID:     m.nextID,
 		Ptmx:   ptmx,
-		Buffer: new(bytes.Buffer),
+		Buffer: NewRingBuffer(1024 * 1024),
 	}
 	m.nextID++
 
@@ -69,23 +95,22 @@ func (m *Manager) streamSessionOutput(s *Session) {
 			return
 		}
 
+		data := buf[:n]
+
 		s.Mu.Lock()
-		s.Buffer.Write(buf[:n])
+		s.Buffer.Write(data)
 		s.Mu.Unlock()
 
-		hasClear := bytes.Contains(buf[:n], clearSeq)
+		hasClear := bytes.Contains(data, clearSeq)
 
 		m.Mu.Lock()
 		isActive := len(m.Sessions) > 0 && m.Sessions[m.ActiveIdx].ID == s.ID
 
 		if isActive {
-			os.Stdout.Write(buf[:n])
+			os.Stdout.Write(data)
 			if hasClear {
 				m.Mu.Unlock()
 				m.DrawFooter()
-				// Lock again to satisfy the defer/logic flow if we had more code
-				// (Though here we just loop, so we don't strictly need to relock
-				// unless we access m fields again in this block)
 			} else {
 				m.Mu.Unlock()
 			}
@@ -161,23 +186,63 @@ func (m *Manager) DrawFooter() {
 		return
 	}
 
-	fmt.Print("\0337")
-	fmt.Printf("\033[1;%dr", height-1)
+	// Styles
+	styleBar := lipgloss.NewStyle().
+		Background(lipgloss.Color("#B4C0DA")).
+		Foreground(lipgloss.Color("#484D57")).
+		Padding(0, 1)
 
-	m.winSize = &pty.Winsize{Rows: uint16(height - 1), Cols: uint16(width)}
+	styleTab := lipgloss.NewStyle().
+		Background(lipgloss.Color("#DACEB4")).
+		Foreground(lipgloss.Color("#484D57")).
+		Padding(0, 1)
+
+	styleActiveTab := lipgloss.NewStyle().
+		Background(lipgloss.Color("#B4DABB")).
+		Foreground(lipgloss.Color("#484D57")).
+		Padding(0, 1)
+
 	m.Mu.Lock()
-	for _, s := range m.Sessions {
-		pty.Setsize(s.Ptmx, m.winSize)
-	}
-
 	displayIdx := m.ActiveIdx + 1
 	totalSessions := len(m.Sessions)
 	m.Mu.Unlock()
 
-	text := fmt.Sprintf("\033[30;42m TaskFlow | Tab: %d/%d | Ctrl+N: New | Ctrl+B: Switch | Ctrl+Q: Quit \033[0m",
-		displayIdx, totalSessions)
+	// Build Tab List
+	var tabs []string
+	for i := 0; i < totalSessions; i++ {
+		t := fmt.Sprintf("Tab %d", i+1)
+		if i == m.ActiveIdx {
+			tabs = append(tabs, styleActiveTab.Render(t))
+		} else {
+			tabs = append(tabs, styleTab.Render(t))
+		}
+	}
 
-	fmt.Printf("\033[%d;1f\033[2K%s", height, text)
+	// Status Bar
+	statusText := fmt.Sprintf("TaskFlow | %d/%d | Ctrl+N: New | Ctrl+B: Switch | Ctrl+Q: Quit", displayIdx, totalSessions)
+	status := styleBar.Width(width - lipgloss.Width(lipgloss.JoinHorizontal(lipgloss.Top, tabs...))).Render(statusText)
+
+	footer := lipgloss.JoinHorizontal(lipgloss.Top, append(tabs, status)...)
+
+	// Enforce width
+	if lipgloss.Width(footer) < width {
+		footer = lipgloss.NewStyle().Width(width).Background(lipgloss.Color("62")).Render(footer) // fill remaining
+	}
+
+	fmt.Print("\0337")
+	region := fmt.Sprintf("\033[1;%dr", height-1)
+	fmt.Print(region)
+
+	m.Mu.Lock()
+	m.scrollRegion = region
+	m.winSize = &pty.Winsize{Rows: uint16(height - 1), Cols: uint16(width)}
+	for _, s := range m.Sessions {
+		pty.Setsize(s.Ptmx, m.winSize)
+	}
+	m.Mu.Unlock()
+
+	// Move to bottom and print
+	fmt.Printf("\033[%d;1f\033[2K%s", height, footer)
 
 	fmt.Print("\0338")
 }
@@ -204,28 +269,13 @@ func (m *Manager) Run() {
 		}
 
 		input := buf[:n]
-		ctrlTabSeq := []byte{27, 91, 90}
 
-		if bytes.Equal(input, ctrlTabSeq) {
-			m.SwitchTab()
+		if m.Config.FindAndInvoke(string(input), m) {
 			continue
 		}
 
-		if len(input) == 1 {
-			key := input[0]
-
-			if key == 14 {
-				m.AddSession()
-				m.DrawFooter()
-				continue
-			}
-			if key == 17 {
-				return
-			}
-			if shortcut, ok := config.Config[key]; ok {
-				shortcut.Action()
-				continue
-			}
+		if len(input) == 1 && input[0] == 17 {
+			return
 		}
 
 		m.Mu.Lock()
